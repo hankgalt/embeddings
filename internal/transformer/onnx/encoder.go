@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 
+	"github.com/comfforts/logger"
 	ort "github.com/yalue/onnxruntime_go"
 
 	"github.com/hankgalt/embeddings/pkg/domain"
 )
 
+// Encoder wraps an ONNX model session and tokenizer to produce sentence embeddings.
 type Encoder struct {
 	cfg        domain.ONNXEncoderConfig
 	tok        *HFTokenizer
@@ -20,6 +21,7 @@ type Encoder struct {
 	hiddenSize int  // H dimension
 }
 
+// NewEncoder loads an ONNX model and prepares it for inference.
 func NewEncoder(cfg domain.ONNXEncoderConfig, tok *HFTokenizer) (*Encoder, error) {
 	if cfg.ModelPath == "" {
 		return nil, fmt.Errorf("missing ModelPath")
@@ -27,35 +29,43 @@ func NewEncoder(cfg domain.ONNXEncoderConfig, tok *HFTokenizer) (*Encoder, error
 	if tok == nil {
 		return nil, fmt.Errorf("nil tokenizer")
 	}
+	if cfg.MaxSeqLen <= 0 || cfg.MaxSeqLen > 512 {
+		cfg.MaxSeqLen = 256
+	}
 
 	// Initialize global ORT env once per process (safe to call multiple times).
 	if err := ort.InitializeEnvironment(); err != nil {
-		return nil, fmt.Errorf("init ORT env: %w", err)
+		return nil, fmt.Errorf("error initializing ORT env: %w", err)
 	}
 
-	// Discover output shape / dtype to pre-size output tensors later.
+	// Discover model's input/output shape/dtype validation & to pre-size output tensors.
 	infosIn, infosOut, err := ort.GetInputOutputInfo(cfg.ModelPath)
 	if err != nil {
-		return nil, fmt.Errorf("GetInputOutputInfo: %w", err)
+		return nil, fmt.Errorf("error getting model input/output info: %w", err)
 	}
-	// _ = infosIn // not used here, but handy for debugging / validation
-
-	log.Println("== Inputs ==")
+	modelHasInputConfig := 0
 	for _, i := range infosIn {
-		log.Printf("- name=%q type=%v dims=%v\n", i.Name, i.DataType, i.Dimensions)
+		if i.Name == cfg.InputNameIDs || i.Name == cfg.InputNameMask {
+			modelHasInputConfig++
+		}
 	}
 
-	log.Println("== Outputs ==")
+	// verify configured inputs exist in model
+	if modelHasInputConfig < 2 {
+		return nil, fmt.Errorf("configured inputs %q and %q not found in model",
+			cfg.InputNameIDs, cfg.InputNameMask)
+	}
+
 	var outInfo *ort.InputOutputInfo
 	for i := range infosOut {
-		log.Printf("- name=%q type=%v dims=%v\n", infosOut[i].Name, infosOut[i].DataType, infosOut[i].Dimensions)
 		if infosOut[i].Name == cfg.OutputName {
 			outInfo = &infosOut[i]
 			break
 		}
 	}
+	// verify configured output exists in model
 	if outInfo == nil {
-		return nil, fmt.Errorf("output %q not found in model", cfg.OutputName)
+		return nil, fmt.Errorf("configured output %q not found in model", cfg.OutputName)
 	}
 
 	outDims := outInfo.Dimensions // Shape == []int64
@@ -96,9 +106,15 @@ func NewEncoder(cfg domain.ONNXEncoderConfig, tok *HFTokenizer) (*Encoder, error
 	}, nil
 }
 
+// Encode processes a batch of texts and returns their embeddings.
 func (e *Encoder) Encode(ctx context.Context, texts []string) ([][]float32, error) {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
 	if e.sess == nil {
-		return nil, fmt.Errorf("encoder not initialized")
+		l.Error("onnx.Encoder:Encode - nil session")
+		return nil, errors.New("nil session")
 	}
 	if len(texts) == 0 {
 		return [][]float32{}, nil
@@ -115,13 +131,15 @@ func (e *Encoder) Encode(ctx context.Context, texts []string) ([][]float32, erro
 	shape2 := ort.NewShape(int64(B), int64(T))
 	idTensor, err := ort.NewTensor(shape2, flattenInt32ToInt64(inputIDs))
 	if err != nil {
-		return nil, fmt.Errorf("input_ids tensor: %w", err)
+		l.Error("onnx.Encoder:Encode - error creating input_ids tensor: %w", err)
+		return nil, err
 	}
 	defer idTensor.Destroy()
 
 	maskTensor, err := ort.NewTensor(shape2, flattenInt32ToInt64(attnMask))
 	if err != nil {
-		return nil, fmt.Errorf("attention_mask tensor: %w", err)
+		l.Error("onnx.Encoder:Encode - error creating attention_mask tensor: %w", err)
+		return nil, err
 	}
 	defer maskTensor.Destroy()
 
@@ -133,13 +151,15 @@ func (e *Encoder) Encode(ctx context.Context, texts []string) ([][]float32, erro
 		outTensor, err = ort.NewEmptyTensor[float32](ort.NewShape(int64(B), int64(T), int64(H))) // [B,T,H]
 	}
 	if err != nil {
-		return nil, fmt.Errorf("alloc out tensor: %w", err)
+		l.Error("onnx.Encoder:Encode - error creating output tensor: %w", err)
+		return nil, err
 	}
 	defer outTensor.Destroy()
 
 	// 4) Run
 	if err := e.sess.Run([]ort.Value{idTensor, maskTensor}, []ort.Value{outTensor}); err != nil {
-		return nil, fmt.Errorf("ORT Run: %w", err)
+		l.Error("onnx.Encoder:Encode - error during ORT Run: %w", err)
+		return nil, err
 	}
 
 	// 5) Collect (+ optional pooling)
@@ -171,21 +191,36 @@ func (e *Encoder) Encode(ctx context.Context, texts []string) ([][]float32, erro
 	return embs, nil
 }
 
-func (e *Encoder) Close() error {
-	var err error
+// Close releases resources associated with the Encoder.
+func (e *Encoder) Close(ctx context.Context) error {
+	l, err := logger.LoggerFromContext(ctx)
+	if err != nil {
+		l = logger.GetSlogLogger()
+	}
+
 	if e.sess != nil {
+		// Destroy the ONNX session
 		err = e.sess.Destroy()
+		if err != nil {
+			l.Error("onnx.Encoder:Close - error destroying session", "error", err.Error())
+		}
 		e.sess = nil
 	}
-	if eErr := ort.DestroyEnvironment(); eErr != nil {
-		if err != nil {
-			return errors.Join(err, eErr)
+	// Destroy the process ORT environment if encoder/process owns it
+	if !e.cfg.GlobalRuntime {
+		l.Info("onnx.Encoder:Close - ORT environment is not global, destroying process ORT environment")
+		if eErr := ort.DestroyEnvironment(); eErr != nil {
+			if err != nil {
+				l.Error("onnx.Encoder:Close - error destroying process ORT environment", "error", eErr.Error())
+				return errors.Join(err, eErr)
+			}
+			return eErr
 		}
-		return eErr
 	}
 	return nil
 }
 
+// flattenInt32ToInt64 flattens a 2D slice of int32 to a 1D slice of int64.
 func flattenInt32ToInt64(xs [][]int32) []int64 {
 	if len(xs) == 0 {
 		return nil
@@ -199,6 +234,7 @@ func flattenInt32ToInt64(xs [][]int32) []int64 {
 	return out
 }
 
+// L2Normalize normalizes a vector in place to unit length.
 func L2Normalize(v []float32) {
 	var s float64
 	for _, x := range v {

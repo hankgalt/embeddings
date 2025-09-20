@@ -7,11 +7,13 @@ import (
 	"github.com/sugarme/tokenizer/pretrained"
 )
 
+// HFTokenizer wraps a HuggingFace tokenizer for ONNX models.
 type HFTokenizer struct {
 	tok                 *tk.Tokenizer
 	clsID, sepID, padID int
 }
 
+// NewHFTokenizerFromLocal loads a tokenizer from a local tokenizer.json file.
 func NewHFTokenizerFromLocal(path string) (*HFTokenizer, error) {
 	tok, err := pretrained.FromFile(path) // loads tokenizer.json
 	if err != nil {
@@ -25,6 +27,7 @@ func NewHFTokenizerFromLocal(path string) (*HFTokenizer, error) {
 	return &HFTokenizer{tok: tok, clsID: clsID, sepID: sepID, padID: padID}, nil
 }
 
+// idOrDefault returns the token ID for a given token or a default if not found.
 func idOrDefault(t *tk.Tokenizer, token string, def int) int {
 	id, ok := t.TokenToId(token)
 	if !ok {
@@ -33,6 +36,7 @@ func idOrDefault(t *tk.Tokenizer, token string, def int) int {
 	return int(id)
 }
 
+// VocabSize returns the size of the tokenizer's vocabulary.
 func (h *HFTokenizer) VocabSize() (int, error) {
 	if h.tok == nil {
 		return 0, fmt.Errorf("tokenizer nil")

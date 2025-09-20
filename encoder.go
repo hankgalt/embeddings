@@ -13,15 +13,18 @@ import (
 	"github.com/hankgalt/embeddings/pkg/domain"
 )
 
+// SentenceTransformer interface defines methods for encoding texts into embeddings and resource cleanup.
 type SentenceTransformer interface {
 	Encode(ctx context.Context, texts []string) ([][]float32, error)
 	Close(ctx context.Context) error
 }
 
+// onnxSentenceTransformer implements SentenceTransformer using an ONNX Encoder.
 type onnxSentenceTransformer struct {
 	encoder *onnx.Encoder
 }
 
+// NewONNXSentenceTransformer initializes an ONNX-based sentence transformer with the given configuration.
 func NewONNXSentenceTransformer(ctx context.Context, cfg domain.ONNXEncoderConfig) (*onnxSentenceTransformer, error) {
 	l, err := logger.LoggerFromContext(ctx)
 	if err != nil {
@@ -61,6 +64,7 @@ func NewONNXSentenceTransformer(ctx context.Context, cfg domain.ONNXEncoderConfi
 	}, nil
 }
 
+// Encode processes a batch of texts and returns their embeddings.
 func (o *onnxSentenceTransformer) Encode(ctx context.Context, texts []string) ([][]float32, error) {
 	l, err := logger.LoggerFromContext(ctx)
 	if err != nil {
@@ -75,9 +79,10 @@ func (o *onnxSentenceTransformer) Encode(ctx context.Context, texts []string) ([
 	return o.encoder.Encode(ctx, texts)
 }
 
+// Close releases resources associated with the onnxSentenceTransformer.
 func (o *onnxSentenceTransformer) Close(ctx context.Context) error {
 	if o.encoder != nil {
-		return o.encoder.Close()
+		return o.encoder.Close(ctx)
 	}
 	return nil
 }
