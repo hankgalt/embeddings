@@ -52,10 +52,10 @@ func (h *HFTokenizer) EncodeBatch(texts []string, maxLen int) ([][]int32, [][]in
 		return [][]int32{}, [][]int32{}, 0, nil
 	}
 
+	// 1) Encode each text individually & find longest
 	longest := 0
 	encs := make([]*tk.Encoding, 0, len(texts))
 	for _, s := range texts {
-		// Use EncodeSingle to avoid constructing tk.EncodeInput manually.
 		enc, err := h.tok.EncodeSingle(s, true)
 		if err != nil {
 			return nil, nil, 0, err

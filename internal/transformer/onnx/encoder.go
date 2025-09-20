@@ -33,12 +33,12 @@ func NewEncoder(cfg domain.ONNXEncoderConfig, tok *HFTokenizer) (*Encoder, error
 		return nil, fmt.Errorf("init ORT env: %w", err)
 	}
 
-	// Discover output shape / dtype so we can pre-size output tensors later.
+	// Discover output shape / dtype to pre-size output tensors later.
 	infosIn, infosOut, err := ort.GetInputOutputInfo(cfg.ModelPath)
 	if err != nil {
 		return nil, fmt.Errorf("GetInputOutputInfo: %w", err)
 	}
-	_ = infosIn // not used here, but handy for debugging / validation
+	// _ = infosIn // not used here, but handy for debugging / validation
 
 	log.Println("== Inputs ==")
 	for _, i := range infosIn {
@@ -59,7 +59,7 @@ func NewEncoder(cfg domain.ONNXEncoderConfig, tok *HFTokenizer) (*Encoder, error
 	}
 
 	outDims := outInfo.Dimensions // Shape == []int64
-	rank := len(outDims)          // <-- use len(), not Get()
+	rank := len(outDims)
 	var H int
 
 	switch rank {
